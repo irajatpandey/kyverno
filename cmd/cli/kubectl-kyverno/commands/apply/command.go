@@ -914,14 +914,23 @@ func (c *ApplyCommandConfig) applyImageValidatingPolicies(
 		engineResponse, err := engine.HandleValidating(context.TODO(), request, nil)
 		if err != nil {
 			errOut := err
-			if resource.GetKind() == "Secret" {
+			hasSecret := resource.GetKind() == "Secret"
+			if !hasSecret {
+				for _, p := range engineResponse.Policies {
+					if trace.HasSecret(p.Trace) {
+						hasSecret = true
+						break
+					}
+				}
+			}
+			if hasSecret {
 				errOut = errors.New("(redacted)")
 			}
 			if c.ContinueOnFail {
 				fmt.Fprintf(out, "failed to apply image validating policies on resource %s (%v)\n", resource.GetName(), errOut)
 				continue
 			}
-			if resource.GetKind() == "Secret" {
+			if hasSecret {
 				return responses, fmt.Errorf("failed to apply image validating policies on resource %s: %w", resource.GetName(), errOut)
 			}
 			return responses, fmt.Errorf("failed to apply image validating policies on resource %s (%w)", resource.GetName(), err)
@@ -970,7 +979,7 @@ func (c *ApplyCommandConfig) applyImageValidatingPolicies(
 					if rslt.Trace.ResourceNamespace == "" {
 						rslt.Trace.ResourceNamespace = json.GetNamespace()
 					}
-					if rslt.Trace.ResourceKind == "Secret" {
+					if rslt.Trace.ResourceKind == "Secret" || trace.HasSecret(rslt.Trace) {
 						hasSecret = true
 					}
 				}
@@ -1106,8 +1115,56 @@ func decisionKey(policyKind, policyName, resourceKind, resourceNamespace, resour
 	return fmt.Sprintf("%s/%s/%s/%s/%s", policyKind, policyName, resourceKind, resourceNamespace, resourceName)
 }
 
+func hasCustomExtractors(policy engineapi.GenericPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	ivp := policy.AsImageValidatingPolicyLike()
+	if ivp == nil {
+		return false
+	}
+	spec := ivp.GetSpec()
+	if spec == nil {
+		return false
+	}
+	return len(spec.ImageExtractors) > 0 || spec.EvaluationMode() == policieskyvernoio.EvaluationModeJSON
+}
+
+func hasDynamicMessageExpression(policy engineapi.GenericPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	if vp := policy.AsValidatingPolicyLike(); vp != nil {
+		spec := vp.GetSpec()
+		if spec != nil {
+			for _, v := range spec.Validations {
+				if v.MessageExpression != "" {
+					return true
+				}
+			}
+		}
+	}
+	if ivp := policy.AsImageValidatingPolicyLike(); ivp != nil {
+		spec := ivp.GetSpec()
+		if spec != nil {
+			for _, v := range spec.Validations {
+				if v.MessageExpression != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (c *ApplyCommandConfig) shouldRedactRuleMessage(resp engineapi.EngineResponse, rule engineapi.RuleResponse) bool {
 	if resp.Resource.GetKind() == "Secret" {
+		return true
+	}
+	if hasCustomExtractors(resp.Policy()) {
+		return true
+	}
+	if hasDynamicMessageExpression(resp.Policy()) {
 		return true
 	}
 	if !c.Explain || len(c.decisionMap) == 0 {
@@ -1214,7 +1271,7 @@ func (c *ApplyCommandConfig) applyDeletingPolicies(
 			c.printTrace(out, resp.Trace)
 			if err != nil {
 				errOut := err
-				if resource.GetKind() == "Secret" {
+				if resource.GetKind() == "Secret" || trace.HasSecret(resp.Trace) {
 					errOut = errors.New("(redacted)")
 				}
 				response := engineapi.NewEngineResponse(*resource, genericPolicy, nil)
@@ -1229,7 +1286,7 @@ func (c *ApplyCommandConfig) applyDeletingPolicies(
 					fmt.Fprintf(out, "failed to apply deleting policies on %s: %v\n", payloadType, errOut)
 					continue
 				}
-				if resource.GetKind() == "Secret" {
+				if resource.GetKind() == "Secret" || trace.HasSecret(resp.Trace) {
 					return responses, fmt.Errorf("failed to apply deleting policies on %s: %w", payloadType, errOut)
 				}
 				return responses, fmt.Errorf("failed to apply deleting policies on %s: %w", payloadType, err)

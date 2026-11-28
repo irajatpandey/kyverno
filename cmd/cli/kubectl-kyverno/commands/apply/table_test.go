@@ -274,3 +274,87 @@ func TestSanitizeUserFacingResponses_PolicyKindDisambiguation(t *testing.T) {
 	// ImageValidatingPolicy rule was non-secret static -> preserved
 	assert.Equal(t, "static failure: image tag is missing", sanitized[1].PolicyResponse.Rules[0].Message())
 }
+
+func TestSanitizeUserFacingResponses_CustomExtractorWithoutExplain(t *testing.T) {
+	ivpol := engineapi.NewImageValidatingPolicy(&policiesv1beta1.ImageValidatingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-extractor-policy"},
+		Spec: policiesv1alpha1.ImageValidatingPolicySpec{
+			ImageExtractors: []policiesv1alpha1.ImageExtractor{
+				{
+					Name: "customContainers",
+				},
+			},
+		},
+	})
+
+	podRes := unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name": "my-pod",
+			},
+		},
+	}
+
+	ivpolResp := engineapi.EngineResponse{
+		Resource: podRes,
+		PolicyResponse: engineapi.PolicyResponse{
+			Rules: []engineapi.RuleResponse{
+				*engineapi.RuleFail("check-image", engineapi.ImageVerify, "image from custom extractor: s3cr3t/img:1.0 failed digest", nil),
+			},
+		},
+	}.WithPolicy(ivpol)
+
+	cfg := &ApplyCommandConfig{
+		Explain: false, // explain is off
+	}
+
+	sanitized := cfg.sanitizeUserFacingResponses([]engineapi.EngineResponse{ivpolResp})
+	assert.Equal(t, "(redacted)", sanitized[0].PolicyResponse.Rules[0].Message())
+
+	var buf bytes.Buffer
+	printTable(&buf, true, false, sanitized...)
+	assert.Contains(t, buf.String(), "(redacted)")
+	assert.NotContains(t, buf.String(), "s3cr3t")
+}
+
+func TestSanitizeUserFacingResponses_DynamicMessageExpressionWithoutExplain(t *testing.T) {
+	vpol := engineapi.NewValidatingPolicy(&policiesv1beta1.ValidatingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "dynamic-msg-policy"},
+		Spec: policiesv1alpha1.ValidatingPolicySpec{
+			Validations: []admissionregistrationv1.Validation{
+				{
+					Expression:        "object.spec.replicas > 1",
+					MessageExpression: "'replicas ' + string(object.spec.replicas) + ' is too low'",
+				},
+			},
+		},
+	})
+
+	podRes := unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name": "my-pod",
+			},
+		},
+	}
+
+	vpolResp := engineapi.EngineResponse{
+		Resource: podRes,
+		PolicyResponse: engineapi.PolicyResponse{
+			Rules: []engineapi.RuleResponse{
+				*engineapi.RuleFail("check-replicas", engineapi.Validation, "replicas 1 is too low", nil),
+			},
+		},
+	}.WithPolicy(vpol)
+
+	cfg := &ApplyCommandConfig{
+		Explain: false, // explain is off
+	}
+
+	sanitized := cfg.sanitizeUserFacingResponses([]engineapi.EngineResponse{vpolResp})
+	assert.Equal(t, "(redacted)", sanitized[0].PolicyResponse.Rules[0].Message())
+}
